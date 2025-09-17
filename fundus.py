@@ -136,6 +136,7 @@ def stop_preview():
     status_var.set("Предпросмотр остановлен")
 
 def take_photo():
+    """Обычное фото с видимой вспышкой (ИК временно гасим)."""
     def capture():
         try:
             # Свет: переходим на видимую вспышку
@@ -161,6 +162,25 @@ def take_photo():
             status_var.set(f"Ошибка при съёмке: {e}")
             print("Capture error:", e)
     threading.Thread(target=capture, daemon=True).start()
+
+def take_photo_ir():
+    """IR-фото: видимую вспышку НЕ включаем, ИК НЕ выключаем."""
+    def capture_ir():
+        try:
+            # На всякий случай убеждаемся, что видимая вспышка не горит
+            vis_led.off()
+            # ИК оставляем в текущем состоянии (в предпросмотре она включена)
+
+            os.makedirs(save_dir, exist_ok=True)
+            now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(save_dir, f"fundusIR_{now}.jpg")
+            picam2.capture_file(path)
+
+            status_var.set(f"IR-фото сохранено: {path}")
+        except Exception as e:
+            status_var.set(f"Ошибка при IR-съёмке: {e}")
+            print("IR capture error:", e)
+    threading.Thread(target=capture_ir, daemon=True).start()
 
 # ================== УПРАВЛЕНИЕ ==================
 def zoom_in():
@@ -253,9 +273,10 @@ overlay_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
 
 left_group = tk.Frame(overlay_bar, bg="black")
 left_group.pack(side="left", padx=6, pady=6)
-tk.Button(left_group, text="Фото",  command=take_photo, font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум −", command=zoom_out,  font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум +", command=zoom_in,    font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(left_group, text="Фото",     command=take_photo,    font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(left_group, text="Инф фото", command=take_photo_ir, font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(left_group, text="Зум −",    command=zoom_out,      font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(left_group, text="Зум +",    command=zoom_in,       font=LARGE, height=1).pack(side="left", padx=3)
 
 mid_group = tk.Frame(overlay_bar, bg="black")
 mid_group.pack(side="left", padx=6, pady=6)
