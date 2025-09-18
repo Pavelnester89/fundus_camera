@@ -12,16 +12,13 @@ from gpiozero import LED
 from picamera2 import Picamera2
 
 # ================== НАСТРОЙКИ ЖЕЛЕЗА ==================
-# Пины Raspberry Pi (BCM)
 IR_GPIO  = 17     # Pin 11 – ИК-подсветка (горит в предпросмотре)
 VIS_GPIO = 27     # Pin 13 – видимая вспышка (горит только на кадр)
-
-# Если на твоей плате «логика инверсная» (1 = выкл), поставь False -> True.
 ACTIVE_HIGH = True
 
-# Длительность вспышки видимого света (секунды)
-FLASH_PRE_DELAY  = 0.02   # после выключения ИК, до включения вспышки
-FLASH_ON_TIME    = 0.08   # держим вспышку включенной перед снимком
+# Времена вспышки (сек)
+FLASH_PRE_DELAY  = 0.02
+FLASH_ON_TIME    = 0.08
 
 # ================== ИНИЦИАЛИЗАЦИЯ ==================
 ir_led  = LED(IR_GPIO,  active_high=ACTIVE_HIGH)
@@ -30,8 +27,12 @@ ir_led.off()
 vis_led.off()
 
 picam2 = Picamera2()
-preview_config = picam2.create_preview_configuration(main={"size": (640, 480)})
-picam2.configure(preview_config)
+
+# >>> ВАЖНО: одна конфигурация для превью и фото (один поток main)
+still_config = picam2.create_still_configuration(
+    main={"size": (1280, 720)}   # одинаковый размер кадра для экрана и файла
+)
+picam2.configure(still_config)
 
 controls = getattr(picam2, "camera_controls", {})
 HAS_LENSPOS = "LensPosition" in controls
@@ -42,7 +43,7 @@ focus_position = 1.0
 save_dir = os.path.expanduser("~/Pictures")
 running_preview = False
 
-# --- UI переменные (заполнятся после создания окон) ---
+# --- UI переменные ---
 status_var = None
 zoom_value_var = None
 focus_value_var = None
@@ -52,7 +53,6 @@ preview_area = None
 
 # ================== ВСПОМОГАТЕЛЬНОЕ ==================
 def resize_cover(img, box_w, box_h):
-    """Масштабировать с обрезкой (cover) под окно предпросмотра."""
     if box_w <= 0 or box_h <= 0:
         return img
     img_w, img_h = img.size
@@ -67,10 +67,11 @@ def resize_cover(img, box_w, box_h):
 
 # ================== КАМЕРА/СВЕТ ==================
 def apply_zoom():
+    """Один и тот же ScalerCrop для превью и фото -> совпадает масштаб."""
     global zoom_factor
     zoom_factor = max(1.0, min(zoom_factor, 4.0))
     try:
-        sensor_size = picam2.sensor_resolution
+        sensor_size = picam2.sensor_resolution  # (w, h)
         new_w = int(sensor_size[0] / zoom_factor)
         new_h = int(sensor_size[1] / zoom_factor)
         x0 = (sensor_size[0] - new_w) // 2
@@ -97,7 +98,8 @@ def update_frame():
     if not running_preview:
         return
     try:
-        frame = picam2.capture_array()
+        # Берём кадр из того же main-потока, что и фото
+        frame = picam2.capture_array()  # по умолчанию "main"
         img = Image.fromarray(frame)
         w = max(100, preview_area.winfo_width())
         h = max(100, preview_area.winfo_height())
@@ -117,7 +119,6 @@ def start_preview():
         apply_zoom()
         running_preview = True
         update_frame()
-        # Свет для наведения: ИК включить, видимую выключить
         vis_led.off()
         ir_led.on()
         status_var.set("Предпросмотр включён")
@@ -136,20 +137,20 @@ def stop_preview():
     status_var.set("Предпросмотр остановлен")
 
 def take_photo():
-    """Обычное фото с видимой вспышкой (ИК временно гасим)."""
+    """Фото с видимой вспышкой. Тот же режим/кадр, что и на экране."""
     def capture():
         try:
-            # Свет: переходим на видимую вспышку
             ir_led.off()
             sleep(FLASH_PRE_DELAY)
             vis_led.on()
             sleep(FLASH_ON_TIME)
 
-            # === Сохранение в Fundus/Видимый ===
             base_dir = os.path.join(save_dir, "Fundus", "Видимый")
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundus_{now}.jpg")
+
+            # Снимок из текущего режима (совпадает с предпросмотром)
             picam2.capture_file(path)
 
             vis_led.off()
@@ -166,17 +167,16 @@ def take_photo():
     threading.Thread(target=capture, daemon=True).start()
 
 def take_photo_ir():
-    """IR-фото: видимую вспышку НЕ включаем, ИК НЕ выключаем."""
+    """IR-фото: вспышка выкл, ИК оставляем."""
     def capture_ir():
         try:
-            vis_led.off()  # На всякий случай убеждаемся, что видимая вспышка не горит
-
-            # === Сохранение в Fundus/ИК ===
+            vis_led.off()
             base_dir = os.path.join(save_dir, "Fundus", "ИК")
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundusIR_{now}.jpg")
-            picam2.capture_file(path)
+
+            picam2.capture_file(path)  # тот же поток/кадр -> совпадает масштаб
 
             status_var.set(f"IR-фото сохранено: {path}")
         except Exception as e:
@@ -230,7 +230,7 @@ save_dir_var = tk.StringVar(value=save_dir)
 zoom_value_var = tk.StringVar(value=f"{zoom_factor:.1f}x")
 focus_value_var = tk.StringVar(value=("авто" if not HAS_LENSPOS else f"{focus_position:.2f}"))
 
-# Экран 1 (старт)
+# Экран 1
 start_frame = tk.Frame(root, bg="black")
 tk.Label(start_frame, text="Прототип камеры", font=("Arial", 18), fg="white", bg="black").pack(pady=10)
 
@@ -261,7 +261,7 @@ tk.Button(start_frame, text="Включить камеру", font=LARGE, height=
 
 tk.Label(start_frame, textvariable=status_var, font=SMALL, fg="gray80", bg="black").pack(pady=6)
 
-# Экран 2 (полноэкранный предпросмотр + верхняя панель)
+# Экран 2
 shooting_frame = tk.Frame(root, bg="black")
 
 preview_area = tk.Frame(shooting_frame, bg="black")
