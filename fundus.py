@@ -145,16 +145,18 @@ def take_photo():
             vis_led.on()
             sleep(FLASH_ON_TIME)
 
-            os.makedirs(save_dir, exist_ok=True)
+            # === Сохранение в Fundus/Видимый ===
+            base_dir = os.path.join(save_dir, "Fundus", "Видимый")
+            os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(save_dir, f"fundus_{now}.jpg")
+            path = os.path.join(base_dir, f"fundus_{now}.jpg")
             picam2.capture_file(path)
 
             vis_led.off()
             if running_preview:
                 ir_led.on()
 
-            status_var.set(f"Фото сохранено: {path}")
+            status_var.set(f"Фото (видимый спектр) сохранено: {path}")
         except Exception as e:
             vis_led.off()
             if running_preview:
@@ -167,13 +169,13 @@ def take_photo_ir():
     """IR-фото: видимую вспышку НЕ включаем, ИК НЕ выключаем."""
     def capture_ir():
         try:
-            # На всякий случай убеждаемся, что видимая вспышка не горит
-            vis_led.off()
-            # ИК оставляем в текущем состоянии (в предпросмотре она включена)
+            vis_led.off()  # На всякий случай убеждаемся, что видимая вспышка не горит
 
-            os.makedirs(save_dir, exist_ok=True)
+            # === Сохранение в Fundus/ИК ===
+            base_dir = os.path.join(save_dir, "Fundus", "ИК")
+            os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(save_dir, f"fundusIR_{now}.jpg")
+            path = os.path.join(base_dir, f"fundusIR_{now}.jpg")
             picam2.capture_file(path)
 
             status_var.set(f"IR-фото сохранено: {path}")
