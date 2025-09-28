@@ -16,22 +16,22 @@ IR_GPIO  = 17     # Pin 11 – ИК-подсветка (горит в предп
 VIS_GPIO = 27     # Pin 13 – видимая вспышка (горит только на кадр)
 ACTIVE_HIGH = True
 
-# Времена вспышки (сек) — сейчас не используются, оставлены на будущее
+# (на будущее)
 FLASH_PRE_DELAY  = 0.02
 FLASH_ON_TIME    = 0.08
 
-# Окно видимого света (сек): свет включён VISIBLE_WINDOW, снимок — посередине окна
+# Окно видимого света (сек): включён 1 c, снимок — посередине
 VISIBLE_WINDOW = 1.0
 
 # Диапазоны и начальные значения
 FOCUS_MIN = 0.0
 FOCUS_MAX = 10.0
-INITIAL_FOCUS = (FOCUS_MIN + FOCUS_MAX) / 2.0  # 5.0 — середина диапазона
+INITIAL_FOCUS = (FOCUS_MIN + FOCUS_MAX) / 2.0  # 5.0
 ZOOM_MIN = 1.0
 ZOOM_MAX = 4.0
 INITIAL_ZOOM = 4.0
 
-# Варианты шагов (для зума и фокуса)
+# Варианты шагов
 STEP_CHOICES = [0.1, 0.5, 1.0, 2.5]
 
 # ================== ИНИЦИАЛИЗАЦИЯ ==================
@@ -42,9 +42,9 @@ vis_led.off()
 
 picam2 = Picamera2()
 
-# >>> ВАЖНО: одна конфигурация для превью и фото (один поток main)
+# Одна конфигурация для превью и фото
 still_config = picam2.create_still_configuration(
-    main={"size": (1280, 720)}   # одинаковый размер кадра для экрана и файла
+    main={"size": (1280, 720)}
 )
 picam2.configure(still_config)
 
@@ -83,7 +83,6 @@ def resize_cover(img, box_w, box_h):
 
 # ================== КАМЕРА/СВЕТ ==================
 def apply_zoom():
-    """Один и тот же ScalerCrop для превью и фото -> совпадает масштаб."""
     global zoom_factor
     zoom_factor = max(ZOOM_MIN, min(zoom_factor, ZOOM_MAX))
     try:
@@ -118,8 +117,7 @@ def update_frame():
     if not running_preview:
         return
     try:
-        # Берём кадр из того же main-потока, что и фото
-        frame = picam2.capture_array()  # по умолчанию "main"
+        frame = picam2.capture_array()  # "main"
         img = Image.fromarray(frame)
         w = max(100, preview_area.winfo_width())
         h = max(100, preview_area.winfo_height())
@@ -134,10 +132,8 @@ def update_frame():
 def start_preview():
     global running_preview, zoom_factor, focus_position
     try:
-        # Перед стартом убеждаемся, что у нас начальные значения
         zoom_factor = INITIAL_ZOOM
         focus_position = INITIAL_FOCUS
-
         picam2.start()
         apply_focus()
         apply_zoom()
@@ -161,63 +157,45 @@ def stop_preview():
     status_var.set("Предпросмотр остановлен")
 
 def take_photo():
-    """Фото в видимом спектре: видимый свет включён ровно VISIBLE_WINDOW секунд,
-    кадр делаем посередине окна (через VISIBLE_WINDOW/2 после включения)."""
+    """Видимый включён VISIBLE_WINDOW сек; кадр — на середине окна."""
     def capture():
         import time
-        start_t = None
         try:
-            # 0) Подготовка света: ИК гасим
             ir_led.off()
-
-            # 1) Включаем видимый и запоминаем момент старта
             vis_led.on()
             start_t = time.monotonic()
 
-            # 2) Ждём до середины окна и снимаем
-            mid_delay = VISIBLE_WINDOW / 2.0
-            sleep(mid_delay)
+            sleep(VISIBLE_WINDOW / 2.0)
 
-            # 3) Путь сохранения
             base_dir = os.path.join(save_dir, "Fundus", "Видимый")
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundus_{now}.jpg")
 
-            # (опционально) на время кадра можно заморозить автоэкспозицию:
+            # при желании можно заморозить автоэкспозицию:
             # picam2.set_controls({"AeEnable": False})
-
             picam2.capture_file(path)
-
             # picam2.set_controls({"AeEnable": True})
 
-            # 4) Додерживаем оставшуюся половину окна с учётом времени,
-            # реально ушедшего на capture_file()
             elapsed = time.monotonic() - start_t
             remaining = max(0.0, VISIBLE_WINDOW - elapsed)
             sleep(remaining)
 
             status_var.set(f"Фото (видимый спектр) сохранено: {path}")
-
         except Exception as e:
             status_var.set(f"Ошибка при съёмке: {e}")
             print("Capture error:", e)
         finally:
-            # 5) Свет: выключаем видимый, при предпросмотре возвращаем ИК
-            try:
-                vis_led.off()
-            except Exception:
-                pass
+            try: vis_led.off()
+            except: pass
             if running_preview:
-                try:
-                    ir_led.on()
-                except Exception:
-                    pass
+                try: ir_led.on()
+                except: pass
 
     threading.Thread(target=capture, daemon=True).start()
 
 def take_photo_ir():
-    """IR-фото: вспышка выкл, ИК оставляем."""
+    """IR-фото без вспышки видимого."""
     def capture_ir():
         try:
             vis_led.off()
@@ -225,9 +203,7 @@ def take_photo_ir():
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundusIR_{now}.jpg")
-
-            picam2.capture_file(path)  # тот же поток/кадр -> совпадает масштаб
-
+            picam2.capture_file(path)
             status_var.set(f"IR-фото сохранено: {path}")
         except Exception as e:
             status_var.set(f"Ошибка при IR-съёмке: {e}")
@@ -274,7 +250,6 @@ def focus_far():
     apply_focus()
 
 def reset_zoom_focus():
-    """Сброс к начальным настройкам (зум 4.0x, фокус середина диапазона)."""
     global zoom_factor, focus_position
     zoom_factor = INITIAL_ZOOM
     focus_position = INITIAL_FOCUS
@@ -292,22 +267,22 @@ root = tk.Tk()
 root.title("Камера глазного дна")
 root.geometry("800x480")
 
-LARGE = ("Arial", 12)
-MID   = ("Arial", 12)
-SMALL = ("Arial", 10)
+# Чуть крупнее для тача
+LARGE = ("Arial", 14)
+MID   = ("Arial", 13)
+SMALL = ("Arial", 11)
 
 status_var = tk.StringVar(value="")
 save_dir_var = tk.StringVar(value=save_dir)
 zoom_value_var = tk.StringVar(value=f"{zoom_factor:.1f}x")
 focus_value_var = tk.StringVar(value=("авто" if not HAS_LENSPOS else f"{focus_position:.2f}"))
 
-# шаги по умолчанию
 zoom_step_var = tk.StringVar(value=str(STEP_CHOICES[0]))   # "0.1"
 focus_step_var = tk.StringVar(value=str(STEP_CHOICES[0]))  # "0.1"
 
 # Экран 1
 start_frame = tk.Frame(root, bg="black")
-tk.Label(start_frame, text="Прототип камеры", font=("Arial", 18), fg="white", bg="black").pack(pady=10)
+tk.Label(start_frame, text="Прототип камеры", font=("Arial", 20), fg="white", bg="black").pack(pady=10)
 
 path_row = tk.Frame(start_frame, bg="black")
 path_row.pack(pady=6, fill="x", padx=12)
@@ -348,45 +323,69 @@ preview_label.pack(fill="both", expand=True)
 overlay_bar = tk.Frame(preview_area, bg="black")
 overlay_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
 
-left_group = tk.Frame(overlay_bar, bg="black")
-left_group.pack(side="left", padx=6, pady=6)
-tk.Button(left_group, text="Фото",     command=take_photo,    font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Инф фото", command=take_photo_ir, font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум −",    command=zoom_out,      font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум +",    command=zoom_in,       font=LARGE, height=1).pack(side="left", padx=3)
+# ====== ЛЕВАЯ ПАНЕЛЬ: ЗУМ с выбором шага ======
+zoom_group = tk.Frame(overlay_bar, bg="black")
+zoom_group.pack(side="left", padx=6, pady=6)
 
-mid_group = tk.Frame(overlay_bar, bg="black")
-mid_group.pack(side="left", padx=6, pady=6)
+tk.Label(zoom_group, text="Зум", font=MID, fg="white", bg="black").pack(anchor="w")
+zoom_buttons = tk.Frame(zoom_group, bg="black")
+zoom_buttons.pack()
+tk.Button(zoom_buttons, text="−", command=zoom_out, font=LARGE, height=1, width=4).pack(side="left", padx=3)
+tk.Button(zoom_buttons, text="+", command=zoom_in,  font=LARGE, height=1, width=4).pack(side="left", padx=3)
 
+zoom_step_row = tk.Frame(zoom_group, bg="black")
+zoom_step_row.pack(pady=(4,0))
+tk.Label(zoom_step_row, text="Шаг:", font=SMALL, fg="white", bg="black").pack(side="left")
+zoom_step_menu = tk.OptionMenu(zoom_step_row, zoom_step_var, *map(str, STEP_CHOICES))
+zoom_step_menu.config(font=SMALL)
+zoom_step_menu.pack(side="left", padx=(4,0))
+
+# ====== СРЕДНЯЯ ПАНЕЛЬ: ФОКУС с выбором шага ======
+focus_group = tk.Frame(overlay_bar, bg="black")
+focus_group.pack(side="left", padx=12, pady=6)
+
+tk.Label(focus_group, text="Фокус", font=MID, fg="white", bg="black").pack(anchor="w")
+focus_buttons = tk.Frame(focus_group, bg="black")
+focus_buttons.pack()
 if HAS_LENSPOS:
-    tk.Button(mid_group, text="Ближе",  command=focus_near, font=LARGE, height=1).pack(side="left", padx=3)
-    tk.Button(mid_group, text="Дальше", command=focus_far,  font=LARGE, height=1).pack(side="left", padx=3)
+    tk.Button(focus_buttons, text="Ближе",  command=focus_near, font=LARGE, height=1).pack(side="left", padx=3)
+    tk.Button(focus_buttons, text="Дальше", command=focus_far,  font=LARGE, height=1).pack(side="left", padx=3)
+else:
+    tk.Label(focus_group, text="Ручной фокус недоступен", font=SMALL, fg="gray70", bg="black").pack()
 
-# Правый блок: индикаторы, выбор шагов, сброс, выход
+focus_step_row = tk.Frame(focus_group, bg="black")
+focus_step_row.pack(pady=(4,0))
+tk.Label(focus_step_row, text="Шаг:", font=SMALL, fg="white", bg="black").pack(side="left")
+focus_step_menu = tk.OptionMenu(focus_step_row, focus_step_var, *map(str, STEP_CHOICES))
+focus_step_menu.config(font=SMALL)
+focus_step_menu.pack(side="left", padx=(4,0))
+
+# ====== ПРАВАЯ ПАНЕЛЬ: индикаторы, сброс, фото-кнопки, выход ======
 right_group = tk.Frame(overlay_bar, bg="black")
 right_group.pack(side="right", padx=6, pady=6)
 
 # Индикаторы
-tk.Label(right_group, text="Зум:", font=SMALL, fg="white", bg="black").pack(side="left")
-tk.Label(right_group, textvariable=zoom_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,6))
-tk.Label(right_group, text="Фокус:", font=SMALL, fg="white", bg="black").pack(side="left")
-tk.Label(right_group, textvariable=focus_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,12))
+indicators = tk.Frame(right_group, bg="black")
+indicators.pack(side="top", anchor="e")
+tk.Label(indicators, text="Зум:", font=SMALL, fg="white", bg="black").pack(side="left")
+tk.Label(indicators, textvariable=zoom_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,10))
+tk.Label(indicators, text="Фокус:", font=SMALL, fg="white", bg="black").pack(side="left")
+tk.Label(indicators, textvariable=focus_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,10))
 
-# Выбор шага зума
-tk.Label(right_group, text="Шаг зума:", font=SMALL, fg="white", bg="black").pack(side="left")
-zoom_step_menu = tk.OptionMenu(right_group, zoom_step_var, *map(str, STEP_CHOICES))
-zoom_step_menu.config(font=SMALL)
-zoom_step_menu.pack(side="left", padx=(0,6))
+# Фото-кнопки
+photo_row = tk.Frame(right_group, bg="black")
+photo_row.pack(side="top", pady=2, anchor="e")
+tk.Button(photo_row, text="Фото",     command=take_photo,    font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(photo_row, text="Инф фото", command=take_photo_ir, font=LARGE, height=1).pack(side="left", padx=3)
 
-# Выбор шага фокуса
-tk.Label(right_group, text="Шаг фокуса:", font=SMALL, fg="white", bg="black").pack(side="left")
-focus_step_menu = tk.OptionMenu(right_group, focus_step_var, *map(str, STEP_CHOICES))
-focus_step_menu.config(font=SMALL)
-focus_step_menu.pack(side="left", padx=(0,12))
+# Управление
+ctrl_row = tk.Frame(right_group, bg="black")
+ctrl_row.pack(side="top", pady=2, anchor="e")
+tk.Button(ctrl_row, text="Сброс",      command=reset_zoom_focus, font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(ctrl_row, text="Выключить",  command=back_to_start,    font=LARGE, height=1).pack(side="left", padx=3)
 
-# Кнопки "Сброс" и "Выключить"
-tk.Button(right_group, text="Сброс", command=reset_zoom_focus, font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(right_group, text="Выключить", command=back_to_start, font=LARGE, height=1).pack(side="left", padx=3)
+# Статус
+tk.Label(right_group, textvariable=status_var, font=SMALL, fg="gray80", bg="black").pack(side="top", pady=2, anchor="e")
 
 def on_close():
     stop_preview()
