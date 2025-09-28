@@ -296,7 +296,7 @@ tk.Button(left_group, text="Зум+", command=zoom_in, font=LARGE, height=1, wid
 mid_group = tk.Frame(overlay_bar)
 mid_group.pack(side="left", padx=6, pady=4)
 if HAS_LENSPOS:
-    tk.Button(mid_group, text="Ближе",  command=focus_near, font=LARGE, height=1, width=6)\
+    tk.Button(mid_group, text="хуй",  command=focus_near, font=LARGE, height=1, width=6)\
         .pack(side="left", padx=2)
     tk.Button(mid_group, text="Дальше", command=focus_far,  font=LARGE, height=1, width=7)\
         .pack(side="left", padx=2)
@@ -332,3 +332,4 @@ def on_close():
 root.protocol("WM_DELETE_WINDOW", on_close)
 start_frame.pack(fill="both", expand=True)
 root.mainloop()
+
