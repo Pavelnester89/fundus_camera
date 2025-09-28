@@ -216,7 +216,7 @@ def take_photo():
     threading.Thread(target=capture, daemon=True).start()
 
 def take_photo_ir():
-    """IR-фото: вспышка выкл, ИК оставляем."""
+    """ИК-фото (IR): без видимой вспышки, ИК оставляем."""
     def capture_ir():
         try:
             vis_led.off()
@@ -227,9 +227,9 @@ def take_photo_ir():
 
             picam2.capture_file(path)  # тот же поток/кадр -> совпадает масштаб
 
-            status_var.set(f"IR-фото сохранено: {path}")
+            status_var.set(f"ИК-фото сохранено: {path}")
         except Exception as e:
-            status_var.set(f"Ошибка при IR-съёмке: {e}")
+            status_var.set(f"Ошибка при ИК-съёмке: {e}")
             print("IR capture error:", e)
     threading.Thread(target=capture_ir, daemon=True).start()
 
@@ -285,9 +285,10 @@ root = tk.Tk()
 root.title("Камера глазного дна")
 root.geometry("800x480")
 
+# Чуть меньше, чтобы всё поместилось в одну линию справа
 LARGE = ("Arial", 12)
-MID   = ("Arial", 12)
-SMALL = ("Arial", 10)
+MID   = ("Arial", 11)
+SMALL = ("Arial", 9)
 
 status_var = tk.StringVar(value="")
 save_dir_var = tk.StringVar(value=save_dir)
@@ -314,7 +315,7 @@ def choose_folder():
         save_dir = folder
         save_dir_var.set(folder)
 
-tk.Button(path_row, text="Выбрать…", font=MID, command=choose_folder).pack(side="left")
+tk.Button(path_row, text="Выбрать…", font=MID, command=choose_folder, height=1).pack(side="left")
 
 def go_to_shooting():
     global save_dir
@@ -340,40 +341,48 @@ preview_label.pack(fill="both", expand=True)
 overlay_bar = tk.Frame(preview_area, bg="black")
 overlay_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
 
-# ====== ЛЕВАЯ ПАНЕЛЬ: ЗУМ ======
+# ====== ЛЕВАЯ ПАНЕЛЬ: Фото/ИК/Зум ======
 left_group = tk.Frame(overlay_bar, bg="black")
 left_group.pack(side="left", padx=6, pady=6)
-tk.Button(left_group, text="Фото",     command=take_photo,    font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Инф фото", command=take_photo_ir, font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум −",    command=zoom_out,      font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(left_group, text="Зум +",    command=zoom_in,       font=LARGE, height=1).pack(side="left", padx=3)
+tk.Button(left_group, text="Фото",   command=take_photo,   font=LARGE, height=1, width=7).pack(side="left", padx=3)
+tk.Button(left_group, text="ИК фото", command=take_photo_ir, font=LARGE, height=1, width=7).pack(side="left", padx=3)
+tk.Button(left_group, text="Зум −",  command=zoom_out,     font=LARGE, height=1, width=6).pack(side="left", padx=3)
+tk.Button(left_group, text="Зум +",  command=zoom_in,      font=LARGE, height=1, width=6).pack(side="left", padx=3)
 
-# ====== СРЕДНЯЯ ПАНЕЛЬ: ФОКУС ======
+# ====== СРЕДНЯЯ ПАНЕЛЬ: Фокус ======
 mid_group = tk.Frame(overlay_bar, bg="black")
 mid_group.pack(side="left", padx=6, pady=6)
 if HAS_LENSPOS:
-    tk.Button(mid_group, text="Ближе",  command=focus_near, font=LARGE, height=1).pack(side="left", padx=3)
-    tk.Button(mid_group, text="Дальше", command=focus_far,  font=LARGE, height=1).pack(side="left", padx=3)
+    tk.Button(mid_group, text="Ближе",  command=focus_near, font=LARGE, height=1, width=7).pack(side="left", padx=3)
+    tk.Button(mid_group, text="Дальше", command=focus_far,  font=LARGE, height=1, width=7).pack(side="left", padx=3)
 
-# ====== ПРАВАЯ ПАНЕЛЬ: индикаторы, общий шаг, сброс, выход ======
+# ====== ПРАВАЯ ПАНЕЛЬ: ВСЁ В ОДНУ ЛИНИЮ ======
 right_group = tk.Frame(overlay_bar, bg="black")
 right_group.pack(side="right", padx=6, pady=6)
 
-# Индикаторы
+# Индикаторы (компактные)
 tk.Label(right_group, text="Зум:", font=SMALL, fg="white", bg="black").pack(side="left")
 tk.Label(right_group, textvariable=zoom_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,6))
 tk.Label(right_group, text="Фокус:", font=SMALL, fg="white", bg="black").pack(side="left")
-tk.Label(right_group, textvariable=focus_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,12))
+tk.Label(right_group, textvariable=focus_value_var, font=SMALL, fg="white", bg="black").pack(side="left", padx=(0,8))
 
-# Один общий выбор шага (на месте «Шаг зума»)
+# Общий шаг + маленький сброс + выход — всё в одной линии
 tk.Label(right_group, text="Шаг:", font=SMALL, fg="white", bg="black").pack(side="left")
 step_menu = tk.OptionMenu(right_group, step_var, *map(str, STEP_CHOICES))
 step_menu.config(font=SMALL)
-step_menu.pack(side="left", padx=(0,12))
+step_menu.pack(side="left", padx=(2,4))
 
-# Кнопки "Сброс" и "Выключить"
-tk.Button(right_group, text="Сброс", command=reset_zoom_focus, font=LARGE, height=1).pack(side="left", padx=3)
-tk.Button(right_group, text="Выключить", command=back_to_start, font=LARGE, height=1).pack(side="left", padx=3)
+# маленькая кнопка «Сброс» рядом со «Шаг»
+tk.Button(right_group, text="Сброс", command=reset_zoom_focus, font=SMALL, height=1, width=6)\
+    .pack(side="left", padx=(2,6))
+
+# Выключить
+tk.Button(right_group, text="Выключить", command=back_to_start, font=SMALL, height=1, width=9)\
+    .pack(side="left", padx=2)
+
+# Статус строкой ниже (не в линии кнопок), чтобы не распихивать её по ширине
+tk.Label(shooting_frame, textvariable=status_var, font=SMALL, fg="gray80", bg="black")\
+    .pack(side="bottom", pady=2)
 
 def on_close():
     stop_preview()
