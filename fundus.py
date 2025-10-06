@@ -333,4 +333,3 @@ root.protocol("WM_DELETE_WINDOW", on_close)
 start_frame.pack(fill="both", expand=True)
 root.mainloop()
 
-
