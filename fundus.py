@@ -10,13 +10,13 @@ import os
 from time import sleep
 from picamera2 import Picamera2
 
-# ================== ПИНЫ СВЕТА (опционально) ==================
-IR_GPIO  = 17     # ИК-подсветка (через транзистор), если есть
-VIS_GPIO = 27     # видимый свет/вспышка, если есть
+# ====== ПИНЫ СВЕТА (опционально) ======
+IR_GPIO  = 17     # ИК-подсветка
+VIS_GPIO = 27     # видимый свет/вспышка
 ACTIVE_HIGH = True
 
 try:
-    from gpiozero import LED
+    from gpiozero import LED, Button
     ir_led  = LED(IR_GPIO,  active_high=ACTIVE_HIGH)
     vis_led = LED(VIS_GPIO, active_high=ACTIVE_HIGH)
     ir_led.off(); vis_led.off()
@@ -25,16 +25,27 @@ except Exception:
         def on(self):  pass
         def off(self): pass
     ir_led, vis_led = _Dummy(), _Dummy()
+    # Заменитель Button, если gpiozero недоступен (чтобы код не падал в оффлайне)
+    class Button:  # noqa: N801
+        def __init__(self, *a, **kw): pass
+        def close(self): pass
+        when_pressed = None
 
-# ================== ПАРАМЕТРЫ ==================
-VISIBLE_WINDOW = 1.0  # сек: длительность включения видимого света; снимок в середине окна
+# ====== ДОП. КНОПКИ ПО GPIO (не через клавиатуру) ======
+# Автофокус / Сброс / Выкл (Назад)
+BTN_AUTO_GPIO  = 16  # Pin 36
+BTN_RESET_GPIO = 20  # Pin 38
+BTN_OFF_GPIO   = 21  # Pin 40
+
+# ====== ПАРАМЕТРЫ ======
+VISIBLE_WINDOW = 1.0       # сек; снимок в середине окна
 FOCUS_MIN, FOCUS_MAX = 0.0, 10.0
 INITIAL_FOCUS = 5.0
 ZOOM_MIN, ZOOM_MAX   = 1.0, 4.0
 INITIAL_ZOOM         = 4.0
-STEP_CHOICES = [0.1, 0.5, 1.0, 2.5]
+STEP = 0.1  # фиксированный шаг
 
-# ================== КАМЕРА ==================
+# ====== КАМЕРА ======
 picam2 = Picamera2()
 still_config   = picam2.create_still_configuration(main={"size": (1280, 720)})
 preview_config = picam2.create_preview_configuration(main={"size": (1280, 720)})
@@ -44,7 +55,7 @@ controls      = getattr(picam2, "camera_controls", {})
 HAS_LENSPOS   = "LensPosition" in controls
 AF_AVAILABLE  = any(k in controls for k in ("AfMode", "AfTrigger"))
 
-# Состояния
+# состояния
 zoom_factor = INITIAL_ZOOM
 focus_position = INITIAL_FOCUS
 last_auto_focus_position = None
@@ -52,7 +63,7 @@ af_mode = "manual"
 save_dir = os.path.expanduser("~/Pictures")
 running_preview = False
 
-# ================== ВСПОМОГАТЕЛЬНОЕ ==================
+# ====== ВСПОМОГАТЕЛЬНОЕ ======
 def resize_cover(img, box_w, box_h):
     if box_w <= 0 or box_h <= 0: return img
     img_w, img_h = img.size
@@ -60,6 +71,12 @@ def resize_cover(img, box_w, box_h):
     img = img.resize((int(img_w * scale), int(img_h * scale)))
     x0, y0 = max(0, (img.width - box_w)//2), max(0, (img.height - box_h)//2)
     return img.crop((x0, y0, x0 + box_w, y0 + box_h))
+
+def toast(msg, ms=1200):
+    """Короткое всплывающее уведомление вверху кадра."""
+    toast_var.set(msg)
+    toast_label.place(relx=0.5, rely=0.0, anchor="n")  # по центру сверху
+    toast_label.after(ms, lambda: toast_label.place_forget())
 
 def update_focus_label():
     try:
@@ -72,14 +89,14 @@ def update_focus_label():
     else:
         focus_value_var.set(f"{focus_position:.2f}" if HAS_LENSPOS else "нет")
 
-# ================== АВТОФОКУС / РУЧНОЙ ==================
+# ====== АВТОФОКУС/РУЧНОЙ ======
 def enable_autofocus():
-    """Включить автофокус (если поддерживается)."""
+    """Включить автофокус (кнопка GPIO16 / Pin36)."""
     global af_mode, last_auto_focus_position
     if not AF_AVAILABLE:
         status_var.set("AF недоступен на этой камере"); return
     try:
-        try: picam2.set_controls({"AfMode": 2})  # Continuous, если доступен
+        try: picam2.set_controls({"AfMode": 2})  # Continuous (если доступно)
         except Exception: pass
         try:
             picam2.set_controls({"AfTrigger": 0})
@@ -100,7 +117,7 @@ def enable_autofocus():
         status_var.set(f"AF ошибка: {e}")
 
 def switch_to_manual_from_current():
-    """Перейти в ручной, стартовав с текущего значения, выставленного автофокусом."""
+    """Перейти в ручной, стартуя с текущего авто-значения."""
     global af_mode, focus_position, last_auto_focus_position
     try:
         lp = picam2.capture_metadata().get("LensPosition", None)
@@ -121,7 +138,7 @@ def switch_to_manual_from_current():
     update_focus_label()
     status_var.set("Фокус: РУЧНОЙ")
 
-# ================== КАМЕРА/СВЕТ ==================
+# ====== КАМЕРА/СВЕТ ======
 def apply_zoom():
     global zoom_factor
     zoom_factor = max(ZOOM_MIN, min(zoom_factor, ZOOM_MAX))
@@ -163,7 +180,7 @@ def update_frame():
     preview_label.after(100, update_frame)
 
 def start_preview():
-    """Старт предпросмотра с автофокусом."""
+    """Старт предпросмотра (по кнопке 'Включить камеру'), сразу AF."""
     global running_preview, zoom_factor, focus_position
     try:
         if running_preview:
@@ -190,7 +207,7 @@ def stop_preview():
     status_var.set("Предпросмотр остановлен")
 
 def take_photo():
-    """Фото с включением VIS на середине окна."""
+    """Фото с включением VIS на середине окна. Показывает всплывашку."""
     def worker():
         try:
             import time
@@ -202,7 +219,7 @@ def take_photo():
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundus_{now}.jpg")
 
-            # переключимся на still-конфиг для кадра
+            # кадр на still-конфиге
             picam2.stop()
             picam2.configure(still_config)
             picam2.start()
@@ -210,72 +227,72 @@ def take_photo():
 
             sleep(max(0, VISIBLE_WINDOW - (time.monotonic()-t0)))
             status_var.set(f"Фото сохранено: {path}")
+            toast("Фото сохранено")
         except Exception as e:
             status_var.set(f"Ошибка фото: {e}")
+            toast("Ошибка фото")
         finally:
             vis_led.off()
             # вернуться в превью
-            if True:
-                try:
-                    picam2.stop()
-                    picam2.configure(preview_config)
-                    picam2.start()
-                    ir_led.on()
-                except: pass
+            try:
+                picam2.stop()
+                picam2.configure(preview_config)
+                picam2.start()
+                ir_led.on()
+            except: pass
     threading.Thread(target=worker, daemon=True).start()
 
-# ================== УПРАВЛЕНИЕ ==================
-def get_step():
-    try: return float(step_var.get())
-    except: return 0.1
-
+# ====== УПРАВЛЕНИЕ (фикс. шаг 0.1) ======
 def zoom_in():
     global zoom_factor
     if af_mode == "auto": switch_to_manual_from_current()
-    zoom_factor += get_step(); apply_zoom()
+    zoom_factor += STEP; apply_zoom()
 
 def zoom_out():
     global zoom_factor
     if af_mode == "auto": switch_to_manual_from_current()
-    zoom_factor -= get_step(); apply_zoom()
+    zoom_factor -= STEP; apply_zoom()
 
 def focus_near():
     global focus_position
     if af_mode == "auto": switch_to_manual_from_current()
     if not HAS_LENSPOS: status_var.set("Нет ручного фокуса"); return
-    focus_position += get_step(); apply_focus()
+    focus_position += STEP; apply_focus()
 
 def focus_far():
     global focus_position
     if af_mode == "auto": switch_to_manual_from_current()
     if not HAS_LENSPOS: status_var.set("Нет ручного фокуса"); return
-    focus_position -= get_step(); apply_focus()
+    focus_position -= STEP; apply_focus()
 
 def reset_zoom_focus():
-    global zoom_factor, focus_position
+    """GPIO20 / Pin38 — Сброс."""
+    global zoom_factor, focus_position, af_mode
     zoom_factor, focus_position = INITIAL_ZOOM, INITIAL_FOCUS
+    af_mode = "manual"
     apply_zoom(); apply_focus()
-    status_var.set("Сброс: зум 4.0×, фокус 5.00")
+    status_var.set("Сброс выполнен")
+    toast("Сброс")
 
 def back_to_start():
+    """GPIO21 / Pin40 — Выкл/Назад."""
     stop_preview()
     shooting_frame.pack_forget()
     start_frame.pack(fill="both", expand=True)
+    toast("Остановлено")
 
-# ================== UI ==================
+# ====== UI ======
 root = tk.Tk()
 root.title("Камера глазного дна")
 root.geometry("800x480")
 
-LARGE = ("Arial", 11)
-MID   = ("Arial", 10)
 SMALL = ("Arial", 9)
 
 status_var = tk.StringVar(value="")
 save_dir_var = tk.StringVar(value=save_dir)
 zoom_value_var = tk.StringVar(value=f"{INITIAL_ZOOM:.1f}x")
 focus_value_var = tk.StringVar(value="—")
-step_var = tk.StringVar(value=str(STEP_CHOICES[0]))
+toast_var = tk.StringVar(value="")
 
 # Экран 1
 start_frame = tk.Frame(root, bg="black")
@@ -283,15 +300,16 @@ tk.Label(start_frame, text="Прототип камеры", font=("Arial", 18), 
 
 path_row = tk.Frame(start_frame, bg="black")
 path_row.pack(pady=6, fill="x", padx=12)
-tk.Label(path_row, text="Папка сохранения:", font=MID, fg="white", bg="black").pack(side="left")
-tk.Entry(path_row, textvariable=save_dir_var, font=MID).pack(side="left", expand=True, fill="x", padx=8)
+tk.Label(path_row, text="Папка сохранения:", font=("Arial", 10), fg="white", bg="black").pack(side="left")
+tk.Entry(path_row, textvariable=save_dir_var, font=("Arial", 10)).pack(side="left", expand=True, fill="x", padx=8)
 
 def choose_folder():
     global save_dir
     folder = filedialog.askdirectory(initialdir=save_dir_var.get() or os.path.expanduser("~"))
     if folder: save_dir_var.set(folder); save_dir = folder
 
-tk.Button(path_row, text="Выбрать…", font=MID, command=choose_folder, height=1, width=9).pack(side="left", padx=4)
+tk.Button(path_row, text="Выбрать…", font=("Arial", 10), command=choose_folder, height=1, width=9)\
+    .pack(side="left", padx=4)
 
 def go_to_shooting():
     global save_dir
@@ -300,12 +318,12 @@ def go_to_shooting():
     shooting_frame.pack(fill="both", expand=True)
     start_preview()
 
-tk.Button(start_frame, text="Включить камеру", font=LARGE, height=1, command=go_to_shooting)\
+tk.Button(start_frame, text="Включить камеру", font=("Arial", 11), height=1, command=go_to_shooting)\
     .pack(pady=8, padx=12, fill="x")
 
 tk.Label(start_frame, textvariable=status_var, font=SMALL, fg="gray80", bg="black").pack(pady=6)
 
-# Экран 2
+# Экран 2 (только индикаторы + всплывашка)
 shooting_frame = tk.Frame(root)
 preview_area = tk.Frame(shooting_frame)
 preview_area.pack(fill="both", expand=True)
@@ -315,37 +333,28 @@ preview_label.pack(fill="both", expand=True)
 overlay_bar = tk.Frame(preview_area)
 overlay_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
 
-# Левая часть: «Авто»
-left_group = tk.Frame(overlay_bar)
-left_group.pack(side="left", padx=4, pady=4)
-tk.Button(left_group, text="Авто", command=enable_autofocus, font=LARGE, height=1, width=6)\
-    .pack(side="left", padx=2)
-
-# Правая часть: индикаторы/шаг/сброс/выкл
+# панель: только Z/F
 right_group = tk.Frame(overlay_bar)
 right_group.pack(side="right", padx=4, pady=4)
 tk.Label(right_group, text="Z:", font=SMALL).pack(side="left")
-tk.Label(right_group, textvariable=zoom_value_var, font=SMALL).pack(side="left", padx=(0,4))
+tk.Label(right_group, textvariable=zoom_value_var, font=SMALL).pack(side="left", padx=(0,8))
 tk.Label(right_group, text="F:", font=SMALL).pack(side="left")
-tk.Label(right_group, textvariable=focus_value_var, font=SMALL).pack(side="left", padx=(0,6))
-tk.Label(right_group, text="Шаг:", font=SMALL).pack(side="left")
-step_menu = tk.OptionMenu(right_group, step_var, *map(str, STEP_CHOICES))
-step_menu.config(font=SMALL)
-step_menu.pack(side="left", padx=(2,4))
-tk.Button(right_group, text="Сброс", command=reset_zoom_focus, font=SMALL, height=1, width=6)\
-    .pack(side="left", padx=(2,4))
-tk.Button(right_group, text="Выкл", command=back_to_start, font=SMALL, height=1, width=6)\
-    .pack(side="left", padx=2)
+tk.Label(right_group, textvariable=focus_value_var, font=SMALL).pack(side="left")
 
+# всплывашка (по центру сверху)
+toast_label = tk.Label(preview_area, textvariable=toast_var, font=("Arial", 11, "bold"),
+                       bg="#222", fg="white", padx=12, pady=6)
+# скрыта по умолчанию; показываем через toast()
+
+# статус снизу
 tk.Label(shooting_frame, textvariable=status_var, font=SMALL).pack(side="bottom", pady=2)
 
-# ================== КЛАВИАТУРНЫЕ БИНДИНГИ ==================
-# Назначения (через gpio-key overlay):
+# ====== КЛАВИАТУРА (через gpio-key overlay) ======
 #  Pin29 GPIO5 -> Enter  -> Фото
-#  Pin31 GPIO6 -> Right  -> Зум +
-#  Pin33 GPIO13-> Left   -> Зум -
-#  Pin35 GPIO19-> Up     -> Фокус +
-#  Pin37 GPIO26-> Down   -> Фокус -
+#  Pin31 GPIO6 -> Right  -> Зум+
+#  Pin33 GPIO13-> Left   -> Зум-
+#  Pin35 GPIO19-> Up     -> Фокус+
+#  Pin37 GPIO26-> Down   -> Фокус-
 root.focus_force()
 root.bind_all('<Return>', lambda e: take_photo())
 root.bind_all('<Right>',  lambda e: zoom_in())
@@ -353,8 +362,20 @@ root.bind_all('<Left>',   lambda e: zoom_out())
 root.bind_all('<Up>',     lambda e: focus_near())
 root.bind_all('<Down>',   lambda e: focus_far())
 
+# ====== ДОП. ФИЗКНОПКИ НА GPIO16/20/21 ======
+btn_auto  = Button(BTN_AUTO_GPIO,  pull_up=True, bounce_time=0.08)
+btn_reset = Button(BTN_RESET_GPIO, pull_up=True, bounce_time=0.08)
+btn_off   = Button(BTN_OFF_GPIO,   pull_up=True, bounce_time=0.08)
+
+btn_auto.when_pressed  = lambda: enable_autofocus()
+btn_reset.when_pressed = lambda: reset_zoom_focus()
+btn_off.when_pressed   = lambda: back_to_start()
+
 def on_close():
     stop_preview()
+    try:
+        btn_auto.close(); btn_reset.close(); btn_off.close()
+    except: pass
     try: ir_led.off(); vis_led.off()
     except: pass
     root.destroy()
