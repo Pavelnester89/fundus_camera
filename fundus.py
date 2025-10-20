@@ -40,13 +40,12 @@ BTN_OFF_GPIO   = 21  # Pin 40 (Выход/Назад)
 VISIBLE_WINDOW = 1.0       # сек; снимок в середине окна
 FOCUS_MIN, FOCUS_MAX = 0.0, 10.0
 INITIAL_FOCUS = 5.0
-ZOOM_MIN, ZOOM_MAX   = 1.0, 4.0
-INITIAL_ZOOM         = 4.0
-STEP = 0.1  # фиксированный шаг
+ZOOM_MIN, ZOOM_MAX   = 1.0, 8.0     # допустимый диапазон зума
+INITIAL_ZOOM         = 4.0          # стартуем с честного 4× от базового окна
+STEP = 0.1  # фиксированный шаг для зума/фокуса
 
 # ====== КАМЕРА ======
 picam2 = Picamera2()
-# Один конфиг для всего: чтобы зум/фокус не сбрасывался
 preview_config = picam2.create_preview_configuration(main={"size": (1280, 720)})
 picam2.configure(preview_config)
 
@@ -62,10 +61,14 @@ af_mode = "manual"
 save_dir = os.path.expanduser("~/Pictures")
 running_preview = False
 _is_capturing = False
+BASE_CROP = None  # (x0, y0, w, h) — принятое за 1×
 
 # ====== ВСПОМОГАТЕЛЬНОЕ ======
+def _even(x):
+    return int(x) & ~1  # ScalerCrop любит чётные значения
+
 def resize_contain(img, box_w, box_h):
-    """Без обрезки (letterbox) — предпросмотр = фото по полю зрения."""
+    """Без обрезки (letterbox): предпросмотр = фото по полю зрения."""
     if box_w <= 0 or box_h <= 0: return img
     img_w, img_h = img.size
     scale = min(box_w / img_w, box_h / img_h)
@@ -88,6 +91,28 @@ def update_focus_label():
         focus_value_var.set(f"auto: {lp:.2f}" if lp is not None else "auto")
     else:
         focus_value_var.set(f"{focus_position:.2f}" if HAS_LENSPOS else "нет")
+
+def init_base_crop(retries=8, delay=0.05):
+    """Считать стартовый ScalerCrop и принять его за 1×."""
+    global BASE_CROP
+    BASE_CROP = None
+    for _ in range(retries):
+        try:
+            meta = picam2.capture_metadata() or {}
+            sc = meta.get("ScalerCrop")
+            if sc and len(sc) == 4 and sc[2] > 0 and sc[3] > 0:
+                BASE_CROP = (_even(sc[0]), _even(sc[1]), _even(sc[2]), _even(sc[3]))
+                break
+        except Exception:
+            pass
+        sleep(delay)
+    # фоллбэк — от конфигурации
+    if BASE_CROP is None:
+        try:
+            w, h = picam2.camera_configuration()["main"]["size"]
+            BASE_CROP = (0, 0, _even(w), _even(h))
+        except Exception:
+            BASE_CROP = (0, 0, 1280, 720)
 
 # ====== АВТОФОКУС/РУЧНОЙ ======
 def enable_autofocus():
@@ -140,16 +165,28 @@ def switch_to_manual_from_current():
 
 # ====== КАМЕРА/СВЕТ ======
 def apply_zoom():
+    """Цифровой зум относительно стартового поля (BASE_CROP = 1×)."""
     global zoom_factor
+    if BASE_CROP is None:
+        init_base_crop()
+
     zoom_factor = max(ZOOM_MIN, min(zoom_factor, ZOOM_MAX))
+    bx, by, bw, bh = BASE_CROP
+
     try:
-        w, h = picam2.camera_configuration()["main"]["size"]
-        new_w = int(w / zoom_factor); new_h = int(h / zoom_factor)
-        x0 = (w - new_w)//2; y0 = (h - new_h)//2
-        picam2.set_controls({"ScalerCrop": (x0, y0, new_w, new_h)})
+        crop_w = max(16, _even(bw / zoom_factor))
+        crop_h = max(16, _even(bh / zoom_factor))
+        x0 = _even(bx + (bw - crop_w) / 2)
+        y0 = _even(by + (bh - crop_h) / 2)
+
+        picam2.set_controls({"ScalerCrop": (x0, y0, crop_w, crop_h)})
+
+        # Фактический зум относительно базы
+        eff_zoom = bw / float(crop_w) if crop_w else zoom_factor
+        zoom_value_var.set(f"{eff_zoom:.1f}x")
     except Exception as e:
         print("Zoom error:", e)
-    zoom_value_var.set(f"{zoom_factor:.1f}x")
+        zoom_value_var.set(f"{zoom_factor:.1f}x")
 
 def apply_focus():
     global focus_position
@@ -168,7 +205,6 @@ def update_frame():
     if not running_preview: return
     try:
         if _is_capturing:
-            # во время съёмки пропустим кадр, чтобы не мешать
             preview_label.after(50, update_frame); return
         frame = picam2.capture_array()
         img = Image.fromarray(frame)
@@ -194,8 +230,11 @@ def start_preview():
         picam2.start()
         running_preview = True
         ir_led.on(); vis_led.off()
-        apply_zoom()
+
+        init_base_crop()   # база = 1×
+        apply_zoom()       # сразу выставим INITIAL_ZOOM честно
         enable_autofocus()
+
         status_var.set("Предпросмотр включён (AF)")
         update_frame()
     except Exception as e:
@@ -214,14 +253,13 @@ def take_photo():
     def worker():
         global _is_capturing, af_mode, last_auto_focus_position, focus_position
         _is_capturing = True
+        prev_af_mode = af_mode
+        prev_awb = True
+        prev_ae  = True
         try:
             import time
             # 1) зафиксировать автоэкспозицию/баланс и фокус
-            prev_af_mode = af_mode
-            prev_awb = True
-            prev_ae  = True
             try:
-                # выключим авто-экспозицию/баланс на время кадра
                 picam2.set_controls({"AeEnable": 0})
             except Exception:
                 prev_ae = None
