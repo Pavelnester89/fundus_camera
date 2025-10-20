@@ -25,17 +25,16 @@ except Exception:
         def on(self):  pass
         def off(self): pass
     ir_led, vis_led = _Dummy(), _Dummy()
-    # Заменитель Button, если gpiozero недоступен (чтобы код не падал в оффлайне)
+    # Заглушка Button, если gpiozero недоступен
     class Button:  # noqa: N801
         def __init__(self, *a, **kw): pass
         def close(self): pass
         when_pressed = None
 
-# ====== ДОП. КНОПКИ ПО GPIO (не через клавиатуру) ======
-# Автофокус / Сброс / Выкл (Назад)
-BTN_AUTO_GPIO  = 16  # Pin 36
-BTN_RESET_GPIO = 20  # Pin 38
-BTN_OFF_GPIO   = 21  # Pin 40
+# ====== ДОП. КНОПКИ ПО GPIO ======
+BTN_AUTO_GPIO  = 16  # Pin 36 (Автофокус)
+BTN_RESET_GPIO = 20  # Pin 38 (Сброс Z/F)
+BTN_OFF_GPIO   = 21  # Pin 40 (Выход/Назад)
 
 # ====== ПАРАМЕТРЫ ======
 VISIBLE_WINDOW = 1.0       # сек; снимок в середине окна
@@ -47,9 +46,9 @@ STEP = 0.1  # фиксированный шаг
 
 # ====== КАМЕРА ======
 picam2 = Picamera2()
-still_config   = picam2.create_still_configuration(main={"size": (1280, 720)})
+# Один конфиг для всего: чтобы зум/фокус не сбрасывался
 preview_config = picam2.create_preview_configuration(main={"size": (1280, 720)})
-picam2.configure(still_config)
+picam2.configure(preview_config)
 
 controls      = getattr(picam2, "camera_controls", {})
 HAS_LENSPOS   = "LensPosition" in controls
@@ -62,20 +61,21 @@ last_auto_focus_position = None
 af_mode = "manual"
 save_dir = os.path.expanduser("~/Pictures")
 running_preview = False
+_is_capturing = False
 
 # ====== ВСПОМОГАТЕЛЬНОЕ ======
-def resize_cover(img, box_w, box_h):
+def resize_contain(img, box_w, box_h):
+    """Без обрезки (letterbox) — предпросмотр = фото по полю зрения."""
     if box_w <= 0 or box_h <= 0: return img
     img_w, img_h = img.size
-    scale = max(box_w / img_w, box_h / img_h)
-    img = img.resize((int(img_w * scale), int(img_h * scale)))
-    x0, y0 = max(0, (img.width - box_w)//2), max(0, (img.height - box_h)//2)
-    return img.crop((x0, y0, x0 + box_w, y0 + box_h))
+    scale = min(box_w / img_w, box_h / img_h)
+    new_w = max(1, int(img_w * scale))
+    new_h = max(1, int(img_h * scale))
+    return img.resize((new_w, new_h))
 
 def toast(msg, ms=1200):
-    """Короткое всплывающее уведомление вверху кадра."""
     toast_var.set(msg)
-    toast_label.place(relx=0.5, rely=0.0, anchor="n")  # по центру сверху
+    toast_label.place(relx=0.5, rely=0.0, anchor="n")
     toast_label.after(ms, lambda: toast_label.place_forget())
 
 def update_focus_label():
@@ -91,12 +91,12 @@ def update_focus_label():
 
 # ====== АВТОФОКУС/РУЧНОЙ ======
 def enable_autofocus():
-    """Включить автофокус (кнопка GPIO16 / Pin36)."""
+    """GPIO16 / Кнопка: включить автофокус."""
     global af_mode, last_auto_focus_position
     if not AF_AVAILABLE:
         status_var.set("AF недоступен на этой камере"); return
     try:
-        try: picam2.set_controls({"AfMode": 2})  # Continuous (если доступно)
+        try: picam2.set_controls({"AfMode": 2})  # Continuous
         except Exception: pass
         try:
             picam2.set_controls({"AfTrigger": 0})
@@ -167,20 +167,23 @@ def apply_focus():
 def update_frame():
     if not running_preview: return
     try:
+        if _is_capturing:
+            # во время съёмки пропустим кадр, чтобы не мешать
+            preview_label.after(50, update_frame); return
         frame = picam2.capture_array()
         img = Image.fromarray(frame)
         w, h = max(100, preview_area.winfo_width()), max(100, preview_area.winfo_height())
-        img = resize_cover(img, w, h)
+        img = resize_contain(img, w, h)  # без обрезки!
         imgtk = ImageTk.PhotoImage(image=img)
         preview_label.imgtk = imgtk
         preview_label.config(image=imgtk)
     except Exception as e:
         print("Preview update error:", e)
     update_focus_label()
-    preview_label.after(100, update_frame)
+    preview_label.after(80, update_frame)
 
 def start_preview():
-    """Старт предпросмотра (по кнопке 'Включить камеру'), сразу AF."""
+    """Старт предпросмотра (кнопка 'Включить камеру'), сразу AF."""
     global running_preview, zoom_factor, focus_position
     try:
         if running_preview:
@@ -207,39 +210,82 @@ def stop_preview():
     status_var.set("Предпросмотр остановлен")
 
 def take_photo():
-    """Фото с включением VIS на середине окна. Показывает всплывашку."""
+    """Фото БЕЗ смены режима. Замораживаем AE/AWB и фокус -> VIS вспышка -> кадр -> возврат."""
     def worker():
+        global _is_capturing, af_mode, last_auto_focus_position, focus_position
+        _is_capturing = True
         try:
             import time
+            # 1) зафиксировать автоэкспозицию/баланс и фокус
+            prev_af_mode = af_mode
+            prev_awb = True
+            prev_ae  = True
+            try:
+                # выключим авто-экспозицию/баланс на время кадра
+                picam2.set_controls({"AeEnable": 0})
+            except Exception:
+                prev_ae = None
+            try:
+                picam2.set_controls({"AwbEnable": 0})
+            except Exception:
+                prev_awb = None
+
+            # если AF был включён — заморозим текущую позицию линзы
+            if AF_AVAILABLE:
+                try:
+                    lp = picam2.capture_metadata().get("LensPosition", None)
+                except Exception:
+                    lp = None
+                if lp is not None:
+                    last_auto_focus_position = lp
+                if HAS_LENSPOS and lp is not None:
+                    try:
+                        picam2.set_controls({"AfMode": 0, "LensPosition": lp})
+                        af_mode = "manual"
+                        focus_position = lp
+                    except Exception:
+                        pass
+
+            # 2) вспышка и задержка до середины окна
             ir_led.off(); vis_led.on()
             t0 = time.monotonic()
             sleep(VISIBLE_WINDOW/2)
+
+            # 3) сохранить кадр прямо из текущего режима
             base_dir = os.path.join(save_dir, "Fundus", "Видимый")
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = os.path.join(base_dir, f"fundus_{now}.jpg")
-
-            # кадр на still-конфиге
-            picam2.stop()
-            picam2.configure(still_config)
-            picam2.start()
             picam2.capture_file(path)
 
+            # добираем хвост окна
             sleep(max(0, VISIBLE_WINDOW - (time.monotonic()-t0)))
+
             status_var.set(f"Фото сохранено: {path}")
             toast("Фото сохранено")
+
         except Exception as e:
             status_var.set(f"Ошибка фото: {e}")
             toast("Ошибка фото")
         finally:
-            vis_led.off()
-            # вернуться в превью
+            # 4) вернуть как было
+            vis_led.off(); ir_led.on()
             try:
-                picam2.stop()
-                picam2.configure(preview_config)
-                picam2.start()
-                ir_led.on()
-            except: pass
+                if prev_ae is not None:  picam2.set_controls({"AeEnable": 1})
+            except Exception:
+                pass
+            try:
+                if prev_awb is not None: picam2.set_controls({"AwbEnable": 1})
+            except Exception:
+                pass
+            # вернуть AF, если раньше он был авто
+            if AF_AVAILABLE and prev_af_mode == "auto":
+                try:
+                    picam2.set_controls({"AfMode": 2})
+                    af_mode = "auto"
+                except Exception:
+                    pass
+            _is_capturing = False
     threading.Thread(target=worker, daemon=True).start()
 
 # ====== УПРАВЛЕНИЕ (фикс. шаг 0.1) ======
@@ -323,33 +369,29 @@ tk.Button(start_frame, text="Включить камеру", font=("Arial", 11),
 
 tk.Label(start_frame, textvariable=status_var, font=SMALL, fg="gray80", bg="black").pack(pady=6)
 
-# Экран 2 (только индикаторы + всплывашка)
+# Экран 2
 shooting_frame = tk.Frame(root)
-preview_area = tk.Frame(shooting_frame)
+preview_area = tk.Frame(shooting_frame, bg="black")
 preview_area.pack(fill="both", expand=True)
-preview_label = tk.Label(preview_area)
+preview_label = tk.Label(preview_area, bg="black")
 preview_label.pack(fill="both", expand=True)
 
-overlay_bar = tk.Frame(preview_area)
+overlay_bar = tk.Frame(preview_area, bg="")
 overlay_bar.place(relx=0, rely=0, relwidth=1, anchor="nw")
 
-# панель: только Z/F
-right_group = tk.Frame(overlay_bar)
+right_group = tk.Frame(overlay_bar, bg="")
 right_group.pack(side="right", padx=4, pady=4)
 tk.Label(right_group, text="Z:", font=SMALL).pack(side="left")
 tk.Label(right_group, textvariable=zoom_value_var, font=SMALL).pack(side="left", padx=(0,8))
 tk.Label(right_group, text="F:", font=SMALL).pack(side="left")
 tk.Label(right_group, textvariable=focus_value_var, font=SMALL).pack(side="left")
 
-# всплывашка (по центру сверху)
 toast_label = tk.Label(preview_area, textvariable=toast_var, font=("Arial", 11, "bold"),
                        bg="#222", fg="white", padx=12, pady=6)
-# скрыта по умолчанию; показываем через toast()
 
-# статус снизу
 tk.Label(shooting_frame, textvariable=status_var, font=SMALL).pack(side="bottom", pady=2)
 
-# ====== КЛАВИАТУРА (через gpio-key overlay) ======
+# ====== КЛАВИАТУРА (gpio-key overlay) ======
 #  Pin29 GPIO5 -> Enter  -> Фото
 #  Pin31 GPIO6 -> Right  -> Зум+
 #  Pin33 GPIO13-> Left   -> Зум-
