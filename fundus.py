@@ -34,7 +34,7 @@ except Exception:
 # ====== ДОП. КНОПКИ ПО GPIO ======
 BTN_AUTO_GPIO  = 16  # Pin 36 (Автофокус)
 BTN_RESET_GPIO = 20  # Pin 38 (Сброс Z/F)
-BTN_OFF_GPIO   = 21  # Pin 40 (Выход/Назад)
+BTN_IR_GPIO    = 21  # Pin 40 (Фото ИК)  <-- раньше был OFF
 
 # ====== ПАРАМЕТРЫ ======
 VISIBLE_WINDOW = 1.0       # сек; снимок в середине окна
@@ -248,8 +248,14 @@ def stop_preview():
     ir_led.off(); vis_led.off()
     status_var.set("Предпросмотр остановлен")
 
+# ====== ФОТО С ВИДИМЫМ СВЕТОМ ======
 def take_photo():
-    """Фото БЕЗ смены режима. Замораживаем AE/AWB и фокус -> VIS вспышка -> кадр -> возврат."""
+    """Фото с видимой вспышкой.
+       - временно выключаем IR
+       - включаем VIS
+       - снимаем
+       - возвращаемся в исходное состояние (IR on, AF/AE/AWB назад).
+    """
     def worker():
         global _is_capturing, af_mode, last_auto_focus_position, focus_position
         _is_capturing = True
@@ -284,12 +290,13 @@ def take_photo():
                     except Exception:
                         pass
 
-            # 2) вспышка и задержка до середины окна
+            # 2) вспышка VIS. IR гасим.
             ir_led.off(); vis_led.on()
+
             t0 = time.monotonic()
             sleep(VISIBLE_WINDOW/2)
 
-            # 3) сохранить кадр прямо из текущего режима
+            # 3) сохранить кадр
             base_dir = os.path.join(save_dir, "Fundus", "Видимый")
             os.makedirs(base_dir, exist_ok=True)
             now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -306,7 +313,7 @@ def take_photo():
             status_var.set(f"Ошибка фото: {e}")
             toast("Ошибка фото")
         finally:
-            # 4) вернуть как было
+            # 4) вернуть как было: выключить VIS, включить IR
             vis_led.off(); ir_led.on()
             try:
                 if prev_ae is not None:  picam2.set_controls({"AeEnable": 1})
@@ -317,6 +324,94 @@ def take_photo():
             except Exception:
                 pass
             # вернуть AF, если раньше он был авто
+            if AF_AVAILABLE and prev_af_mode == "auto":
+                try:
+                    picam2.set_controls({"AfMode": 2})
+                    af_mode = "auto"
+                except Exception:
+                    pass
+            _is_capturing = False
+    threading.Thread(target=worker, daemon=True).start()
+
+# ====== ФОТО В ИК (НОВАЯ КНОПКА GPIO21) ======
+def take_photo_ir():
+    """Фото в ИК:
+       - НЕ включаем видимый свет
+       - НЕ выключаем IR (IR остаётся включённым)
+       - фиксируем AE/AWB/фокус по той же логике
+       - сохраняем в отдельную папку Fundus/ИК
+    """
+    def worker():
+        global _is_capturing, af_mode, last_auto_focus_position, focus_position
+        _is_capturing = True
+        prev_af_mode = af_mode
+        prev_awb = True
+        prev_ae  = True
+        try:
+            import time
+            # 1) зафиксировать автоэкспозицию/баланс и фокус
+            try:
+                picam2.set_controls({"AeEnable": 0})
+            except Exception:
+                prev_ae = None
+            try:
+                picam2.set_controls({"AwbEnable": 0})
+            except Exception:
+                prev_awb = None
+
+            # если AF был включён — заморозим текущую позицию линзы
+            if AF_AVAILABLE:
+                try:
+                    lp = picam2.capture_metadata().get("LensPosition", None)
+                except Exception:
+                    lp = None
+                if lp is not None:
+                    last_auto_focus_position = lp
+                if HAS_LENSPOS and lp is not None:
+                    try:
+                        picam2.set_controls({"AfMode": 0, "LensPosition": lp})
+                        af_mode = "manual"
+                        focus_position = lp
+                    except Exception:
+                        pass
+
+            # 2) режим ИК:
+            #    оставляем ir_led ВКЛ, видимый свет НЕ включаем
+            vis_led.off()
+            ir_led.on()
+
+            t0 = time.monotonic()
+            sleep(VISIBLE_WINDOW/2)
+
+            # 3) сохранить кадр в "ИК"
+            base_dir = os.path.join(save_dir, "Fundus", "ИК")
+            os.makedirs(base_dir, exist_ok=True)
+            now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(base_dir, f"fundus_ir_{now}.jpg")
+            picam2.capture_file(path)
+
+            # добираем хвост окна
+            sleep(max(0, VISIBLE_WINDOW - (time.monotonic()-t0)))
+
+            status_var.set(f"ИК фото сохранено: {path}")
+            toast("ИК фото сохранено")
+
+        except Exception as e:
+            status_var.set(f"Ошибка ИК-фото: {e}")
+            toast("Ошибка ИК-фото")
+        finally:
+            # 4) вернуть автоэкспозицию/баланс, вернуть AF если нужно
+            #    свет: IR остаётся включён, VIS остаётся выключенным.
+            vis_led.off()
+            ir_led.on()
+            try:
+                if prev_ae is not None:  picam2.set_controls({"AeEnable": 1})
+            except Exception:
+                pass
+            try:
+                if prev_awb is not None: picam2.set_controls({"AwbEnable": 1})
+            except Exception:
+                pass
             if AF_AVAILABLE and prev_af_mode == "auto":
                 try:
                     picam2.set_controls({"AfMode": 2})
@@ -359,7 +454,7 @@ def reset_zoom_focus():
     toast("Сброс")
 
 def back_to_start():
-    """GPIO21 / Pin40 — Выкл/Назад."""
+    """Возврат в стартовый экран (используем из UI, не с GPIO)."""
     stop_preview()
     shooting_frame.pack_forget()
     start_frame.pack(fill="both", expand=True)
@@ -390,7 +485,9 @@ tk.Entry(path_row, textvariable=save_dir_var, font=("Arial", 10)).pack(side="lef
 def choose_folder():
     global save_dir
     folder = filedialog.askdirectory(initialdir=save_dir_var.get() or os.path.expanduser("~"))
-    if folder: save_dir_var.set(folder); save_dir = folder
+    if folder:
+        save_dir_var.set(folder)
+        save_dir = folder
 
 tk.Button(path_row, text="Выбрать…", font=("Arial", 10), command=choose_folder, height=1, width=9)\
     .pack(side="left", padx=4)
@@ -430,31 +527,31 @@ toast_label = tk.Label(preview_area, textvariable=toast_var, font=("Arial", 11, 
 tk.Label(shooting_frame, textvariable=status_var, font=SMALL).pack(side="bottom", pady=2)
 
 # ====== КЛАВИАТУРА (gpio-key overlay) ======
-#  Pin29 GPIO5 -> Enter  -> Фото
+#  Pin29 GPIO5 -> Enter  -> Фото (видимый свет)
 #  Pin31 GPIO6 -> Right  -> Зум+
 #  Pin33 GPIO13-> Left   -> Зум-
 #  Pin35 GPIO19-> Up     -> Фокус+
 #  Pin37 GPIO26-> Down   -> Фокус-
 root.focus_force()
-root.bind_all('<Return>', lambda e: take_photo())
+root.bind_all('<Return>', lambda e: take_photo())     # обычное фото
 root.bind_all('<Right>',  lambda e: zoom_in())
 root.bind_all('<Left>',   lambda e: zoom_out())
 root.bind_all('<Up>',     lambda e: focus_near())
 root.bind_all('<Down>',   lambda e: focus_far())
 
 # ====== ДОП. ФИЗКНОПКИ НА GPIO16/20/21 ======
-btn_auto  = Button(BTN_AUTO_GPIO,  pull_up=True, bounce_time=0.08)
-btn_reset = Button(BTN_RESET_GPIO, pull_up=True, bounce_time=0.08)
-btn_off   = Button(BTN_OFF_GPIO,   pull_up=True, bounce_time=0.08)
+btn_auto  = Button(BTN_AUTO_GPIO,  pull_up=True, bounce_time=0.08)  # AF on
+btn_reset = Button(BTN_RESET_GPIO, pull_up=True, bounce_time=0.08)  # сброс зума/фокуса
+btn_ir    = Button(BTN_IR_GPIO,    pull_up=True, bounce_time=0.08)  # ИК-фото
 
 btn_auto.when_pressed  = lambda: enable_autofocus()
 btn_reset.when_pressed = lambda: reset_zoom_focus()
-btn_off.when_pressed   = lambda: back_to_start()
+btn_ir.when_pressed    = lambda: take_photo_ir()  # <-- вместо выключения
 
 def on_close():
     stop_preview()
     try:
-        btn_auto.close(); btn_reset.close(); btn_off.close()
+        btn_auto.close(); btn_reset.close(); btn_ir.close()
     except: pass
     try: ir_led.off(); vis_led.off()
     except: pass
